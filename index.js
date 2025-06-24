@@ -112,6 +112,14 @@ async function handleEvent(event) {
   const userId = event.source.userId;
   const message = event.message.text.trim();
 
+ if (message === '人数') {
+    const count = await countEntries();
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: `現在の入室人数は ${count} 人です。`,
+    });
+  }
+
   if (message === '退出') {
     if (await hasAlreadyExited(userId)) {
       return client.replyMessage(event.replyToken, { type: 'text', text: '今日はすでに退出しています。' });
