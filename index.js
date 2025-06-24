@@ -21,7 +21,7 @@ const auth = new google.auth.GoogleAuth({
   keyFile: '/etc/secrets/credentials.json', // ← 修正済みパス
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
-const spreadsheetId = process.env.SHEET_ID;
+const spreadsheetId = process.env.SPREADSHEET_ID;
 
 // 定数
 const MAX_PEOPLE = 12;
