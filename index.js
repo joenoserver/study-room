@@ -129,7 +129,7 @@ async function handleEvent(event) {
   const message = event.message.text.trim();
 
  if (message === '人数') {
-    const count = await countEntries();
+    const count = await getCurrentPeopleCount();
     return client.replyMessage(event.replyToken, {
       type: 'text',
       text: `現在の入室人数は ${count} 人です。`,
