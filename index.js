@@ -1,11 +1,12 @@
-// 必要なモジュールを読み込み
+// LINE Bot + ガチャコード + スプレッドシート連携
 require('dotenv').config();
 const express = require('express');
-const line = require('@line/bot-sdk');
 const { google } = require('googleapis');
-const fs = require('fs');
+const line = require('@line/bot-sdk');
+const dayjs = require('dayjs');
 
 const app = express();
+app.use(express.json());
 
 // LINE設定
 const config = {
@@ -14,101 +15,100 @@ const config = {
 };
 const client = new line.Client(config);
 
-// Google Sheets 認証
+// Google Sheets認証
 const auth = new google.auth.GoogleAuth({
-  credentials: JSON.parse(fs.readFileSync('credentials.json', 'utf-8')),
+  credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON),
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
 const sheets = google.sheets({ version: 'v4', auth });
-
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-const SHEET_NAME = 'Log';
-const MAX_CAPACITY = 12;
 
-// ガチャで発行済み＆未使用のコード（例）
-let validCodes = ['A1B2C3D4', 'E5F6G7H8', 'I9J0K1L2'];
-let usedCodes = [];
-
-// LINE webhook
+// LINE webhookエンドポイント
 app.post('/webhook', line.middleware(config), async (req, res) => {
   try {
     const events = req.body.events;
-    for (const event of events) {
-      if (event.type === 'message' && event.message.type === 'text') {
-        await handleMessage(event);
-      }
-    }
-    res.status(200).end();
+    const results = await Promise.all(events.map(handleEvent));
+    res.json(results);
   } catch (err) {
-    console.error('Webhook Error:', err);
+    console.error('LINE Webhook Error:', err);
     res.status(500).end();
   }
 });
 
-// メイン処理
-async function handleMessage(event) {
+// 入室・退出処理
+async function handleEvent(event) {
+  if (event.type !== 'message' || event.message.type !== 'text') return null;
   const userId = event.source.userId;
-  const messageText = event.message.text.trim();
-  const today = new Date().toLocaleDateString('ja-JP');
+  const message = event.message.text.trim();
+  const today = dayjs().format('YYYY-MM-DD');
 
-  if (messageText === '入室') {
-    return reply(event.replyToken, 'ガチャで取得したコードを送信してください。');
+  if (/^\d{4}$/.test(message)) {
+    // ガチャコード入力→入室処理
+    const code = message;
+    const isUsed = await checkIfAlreadyEntered(userId, today);
+    if (isUsed) {
+      return reply(event.replyToken, '今日はすでに入室済みです。');
+    }
+    await appendEntry(userId, code, today, '入室');
+    return reply(event.replyToken, '入室が確認されました。ドア暗証番号は「5489」です。');
+
+  } else if (message === '退出') {
+    const canExit = await checkIfEntered(userId, today);
+    if (!canExit) {
+      return reply(event.replyToken, '本日はまだ入室していません。');
+    }
+    const exited = await checkIfExited(userId, today);
+    if (exited) {
+      return reply(event.replyToken, '今日はすでに退出済みです。');
+    }
+    await appendEntry(userId, '', today, '退出');
+    return reply(event.replyToken, '退出が確認されました。ご利用ありがとうございました。');
   }
 
-  // 入室コードとみなす
-  const code = messageText;
+  return reply(event.replyToken, '4桁の入室コードまたは「退出」と送ってください。');
+}
 
-  // コードが有効か確認
-  if (!validCodes.includes(code)) {
-    return reply(event.replyToken, 'そのコードは無効です。ガチャから新しいコードを取得してください。');
-  }
-
-  // すでにそのコードを使ったか確認
-  if (usedCodes.includes(code)) {
-    return reply(event.replyToken, 'このコードはすでに使用済みです。');
-  }
-
-  // スプレッドシートから今日の入室履歴を取得
-  const entries = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A:D`,
-  });
-
-  const rows = entries.data.values || [];
-  const todayUserEntries = rows.filter(row => row[0] === today && row[1] === userId);
-  const currentCount = rows.filter(row => row[0] === today).length;
-
-  if (todayUserEntries.length > 0) {
-    return reply(event.replyToken, '本日はすでに入室済みです。');
-  }
-
-  if (currentCount >= MAX_CAPACITY) {
-    return reply(event.replyToken, '満室です。空きが出るまでお待ちください。');
-  }
-
-  // 入室を記録
-  const now = new Date().toLocaleTimeString('ja-JP');
+// 入室・退出記録追加
+async function appendEntry(userId, code, date, status) {
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A:D`,
+    range: 'ログ!A:D',
     valueInputOption: 'USER_ENTERED',
     requestBody: {
-      values: [[today, userId, code, now]],
+      values: [[userId, code, date, status]]
     },
   });
+}
 
-  usedCodes.push(code);
-  return reply(event.replyToken, '入室を確認しました。ようこそ！');
+// 入室確認
+async function checkIfAlreadyEntered(userId, date) {
+  const rows = await getSheetRows();
+  return rows.some(row => row[0] === userId && row[2] === date && row[3] === '入室');
+}
+async function checkIfEntered(userId, date) {
+  const rows = await getSheetRows();
+  return rows.some(row => row[0] === userId && row[2] === date && row[3] === '入室');
+}
+async function checkIfExited(userId, date) {
+  const rows = await getSheetRows();
+  return rows.some(row => row[0] === userId && row[2] === date && row[3] === '退出');
+}
+
+async function getSheetRows() {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'ログ!A:D',
+  });
+  return res.data.values || [];
 }
 
 function reply(token, text) {
-  return client.replyMessage(token, {
-    type: 'text',
-    text,
-  });
+  return client.replyMessage(token, { type: 'text', text });
 }
 
+// サーバー起動
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
+
