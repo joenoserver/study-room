@@ -18,7 +18,7 @@ const client = new line.Client(config);
 
 // Google Sheets設定
 const auth = new google.auth.GoogleAuth({
-  keyFile: 'credentials.json',
+  keyFile: '/etc/secrets/credentials.json', // ← 修正済みパス
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
 const spreadsheetId = process.env.SHEET_ID;
