@@ -80,35 +80,30 @@ async function hasAlreadyExited(userId) {
   return values.some(row => row[0] === userId && row[1] === '退出' && row[2] === today);
 }
 
-// ✅ LINE Webhookルート（raw bodyで署名検証を通す）
+// ✅ LINE Webhookルート（raw bodyで署名検証を通す＋エラーハンドリング付き）
 app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
-  // LINE SDKのミドルウェアで署名を検証
-  line.middleware(config)(req, res, () => {
-    handleLineWebhook(req, res);
+  line.middleware(config)(req, res, async () => {
+    try {
+      const bodyString = Buffer.isBuffer(req.body)
+        ? req.body.toString()
+        : JSON.stringify(req.body);
+
+      const events = JSON.parse(bodyString).events;
+
+      if (!Array.isArray(events)) {
+        console.error('Invalid events:', events);
+        return res.status(400).send('Invalid events');
+      }
+
+      await Promise.all(events.map(handleEvent));
+      res.sendStatus(200);
+    } catch (err) {
+      console.error('LINE Webhook Error:', err);
+      res.status(500).end();
+    }
   });
 });
 
-// ✅ 本体処理（bodyを自分でparse）
-async function handleLineWebhook(req, res) {
-  let body;
-  try {
-    body = JSON.parse(req.body.toString());
-  } catch (err) {
-    console.error('JSON parse error:', err);
-    return res.status(400).send('Invalid JSON');
-  }
-
-  const events = body.events;
-  if (!Array.isArray(events)) return res.status(400).send('No events');
-
-  try {
-    await Promise.all(events.map(handleEvent));
-    res.sendStatus(200);
-  } catch (err) {
-    console.error('handleEvent error:', err);
-    res.sendStatus(500);
-  }
-}
 
 // LINEイベント処理
 async function handleEvent(event) {
