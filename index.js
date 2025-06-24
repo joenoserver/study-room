@@ -80,7 +80,7 @@ async function hasAlreadyExited(userId) {
   return values.some(row => row[0] === userId && row[1] === '退出' && row[2] === today);
 }
 
-async function getCurrentOccupancy() {
+async function getCurrentPeopleCount() {
   const authClient = await auth.getClient();
   const sheets = google.sheets({ version: 'v4', auth: authClient });
   const today = dayjs().format('YYYY-MM-DD');
