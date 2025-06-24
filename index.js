@@ -8,7 +8,6 @@ const fs = require('fs');
 const dayjs = require('dayjs');
 
 const app = express();
-app.use(express.json());
 
 // LINE Bot設定
 const config = {
@@ -33,12 +32,14 @@ async function logEvent(userId, action) {
   const authClient = await auth.getClient();
   const sheets = google.sheets({ version: 'v4', auth: authClient });
   const today = dayjs().format('YYYY-MM-DD');
+  const now = new Date().toLocaleTimeString('ja-JP', { hour12: false });
+
   await sheets.spreadsheets.values.append({
     spreadsheetId,
     range: 'ログ!A:D',
     valueInputOption: 'USER_ENTERED',
     requestBody: {
-      values: [[userId, action, today, new Date().toLocaleTimeString()]],
+      values: [[userId, action, today, now]],
     },
   });
 }
@@ -79,16 +80,40 @@ async function hasAlreadyExited(userId) {
   return values.some(row => row[0] === userId && row[1] === '退出' && row[2] === today);
 }
 
-// LINE Webhook受信
-app.post('/webhook', line.middleware(config), async (req, res) => {
-  const events = req.body.events;
-  await Promise.all(events.map(handleEvent));
-  res.sendStatus(200);
+// ✅ LINE Webhookルート（raw bodyで署名検証を通す）
+app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  // LINE SDKのミドルウェアで署名を検証
+  line.middleware(config)(req, res, () => {
+    handleLineWebhook(req, res);
+  });
 });
+
+// ✅ 本体処理（bodyを自分でparse）
+async function handleLineWebhook(req, res) {
+  let body;
+  try {
+    body = JSON.parse(req.body.toString());
+  } catch (err) {
+    console.error('JSON parse error:', err);
+    return res.status(400).send('Invalid JSON');
+  }
+
+  const events = body.events;
+  if (!Array.isArray(events)) return res.status(400).send('No events');
+
+  try {
+    await Promise.all(events.map(handleEvent));
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('handleEvent error:', err);
+    res.sendStatus(500);
+  }
+}
 
 // LINEイベント処理
 async function handleEvent(event) {
-  if (event.type !== 'message' || event.message.type !== 'text') return;
+  if (!event || event.type !== 'message' || event.message.type !== 'text') return;
+
   const userId = event.source.userId;
   const message = event.message.text.trim();
 
@@ -118,12 +143,12 @@ async function handleEvent(event) {
 
   return client.replyMessage(event.replyToken, {
     type: 'text',
-    text: '入室するにはガチャガチャで配布された番号を送ってください。退出するには「退出」と送ってください。',
+    text: '入室するにはガチャガチャで配布された番号を送ってください。\n退出するには「退出」と送ってください。',
   });
 }
 
+// サーバー起動
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
-
