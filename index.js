@@ -1,10 +1,8 @@
-// 必ず一番上に記述
+// 必要なモジュールを読み込み
 require('dotenv').config();
-
 const express = require('express');
 const line = require('@line/bot-sdk');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const { GoogleSpreadsheet } = require('google-spreadsheet');
+const { google } = require('googleapis');
 const fs = require('fs');
 
 const app = express();
@@ -16,100 +14,101 @@ const config = {
 };
 const client = new line.Client(config);
 
+// Google Sheets 認証
+const auth = new google.auth.GoogleAuth({
+  credentials: JSON.parse(fs.readFileSync('credentials.json', 'utf-8')),
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+});
+const sheets = google.sheets({ version: 'v4', auth });
+
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const SHEET_NAME = 'Log';
+const MAX_CAPACITY = 12;
+
+// ガチャで発行済み＆未使用のコード（例）
+let validCodes = ['A1B2C3D4', 'E5F6G7H8', 'I9J0K1L2'];
+let usedCodes = [];
+
 // LINE webhook
 app.post('/webhook', line.middleware(config), async (req, res) => {
   try {
-    const results = await Promise.all(req.body.events.map(handleEvent));
-    res.json(results);
+    const events = req.body.events;
+    for (const event of events) {
+      if (event.type === 'message' && event.message.type === 'text') {
+        await handleMessage(event);
+      }
+    }
+    res.status(200).end();
   } catch (err) {
-    console.error('LINE Webhook Error:', err);
+    console.error('Webhook Error:', err);
     res.status(500).end();
   }
 });
 
-// Stripe webhook
-app.post('/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_ENDPOINT_SECRET);
-  } catch (err) {
-    console.error('Stripe webhook signature error:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+// メイン処理
+async function handleMessage(event) {
+  const userId = event.source.userId;
+  const messageText = event.message.text.trim();
+  const today = new Date().toLocaleDateString('ja-JP');
+
+  if (messageText === '入室') {
+    return reply(event.replyToken, 'ガチャで取得したコードを送信してください。');
   }
 
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    const userId = session.metadata.userId;
-    const code = generateCode();
+  // 入室コードとみなす
+  const code = messageText;
 
-    const allowed = await updateSheetAndCheckCapacity(userId);
-    const msg = allowed ? `決済が完了しました。入室用暗証番号: ${code}` : '現在満室です。キャンセル待ちとなります。';
-
-    await client.pushMessage(userId, { type: 'text', text: msg });
+  // コードが有効か確認
+  if (!validCodes.includes(code)) {
+    return reply(event.replyToken, 'そのコードは無効です。ガチャから新しいコードを取得してください。');
   }
 
-  res.json({ received: true });
-});
-
-// LINEイベント処理
-async function handleEvent(event) {
-  if (event.type !== 'message' || event.message.type !== 'text') return null;
-  const text = event.message.text.trim();
-
-  if (text === '入室') {
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card', 'google_pay'],
-      line_items: [
-        {
-          price_data: {
-            currency: 'jpy',
-            product_data: { name: '自習室1日利用券' },
-            unit_amount: 200 * 100,
-          },
-          quantity: 1,
-        },
-      ],
-      mode: 'payment',
-      success_url: 'https://example.com/success',
-      cancel_url: 'https://example.com/cancel',
-      metadata: { userId: event.source.userId },
-    });
-
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: `こちらから決済をお願いします：${session.url}`,
-    });
-  } else {
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: '「入室」または「キャンセル」と送ってください。',
-    });
+  // すでにそのコードを使ったか確認
+  if (usedCodes.includes(code)) {
+    return reply(event.replyToken, 'このコードはすでに使用済みです。');
   }
+
+  // スプレッドシートから今日の入室履歴を取得
+  const entries = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!A:D`,
+  });
+
+  const rows = entries.data.values || [];
+  const todayUserEntries = rows.filter(row => row[0] === today && row[1] === userId);
+  const currentCount = rows.filter(row => row[0] === today).length;
+
+  if (todayUserEntries.length > 0) {
+    return reply(event.replyToken, '本日はすでに入室済みです。');
+  }
+
+  if (currentCount >= MAX_CAPACITY) {
+    return reply(event.replyToken, '満室です。空きが出るまでお待ちください。');
+  }
+
+  // 入室を記録
+  const now = new Date().toLocaleTimeString('ja-JP');
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!A:D`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: {
+      values: [[today, userId, code, now]],
+    },
+  });
+
+  usedCodes.push(code);
+  return reply(event.replyToken, '入室を確認しました。ようこそ！');
 }
 
-// 暗証番号生成
-function generateCode() {
-  return Math.floor(1000 + Math.random() * 9000).toString();
+function reply(token, text) {
+  return client.replyMessage(token, {
+    type: 'text',
+    text,
+  });
 }
 
-// スプレッドシート更新・人数チェック
-async function updateSheetAndCheckCapacity(userId) {
-  const creds = JSON.parse(fs.readFileSync('credentials.json'));
-  const doc = new GoogleSpreadsheet(process.env.SHEET_ID);
-  await doc.useServiceAccountAuth(creds);
-  await doc.loadInfo();
-  const sheet = doc.sheetsByIndex[0];
-
-  await sheet.loadCells('A1:A100');
-  const rows = await sheet.getRows();
-  if (rows.length >= 12) return false; // 満室
-
-  await sheet.addRow({ userId: userId, timestamp: new Date().toISOString() });
-  return true;
-}
-
-// サーバー起動
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
