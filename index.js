@@ -80,6 +80,22 @@ async function hasAlreadyExited(userId) {
   return values.some(row => row[0] === userId && row[1] === '退出' && row[2] === today);
 }
 
+async function getCurrentOccupancy() {
+  const authClient = await auth.getClient();
+  const sheets = google.sheets({ version: 'v4', auth: authClient });
+  const today = dayjs().format('YYYY-MM-DD');
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: 'ログ!A:C',
+  });
+  const values = res.data.values || [];
+
+  const entries = values.filter(row => row[1] === '入室' && row[2] === today).length;
+  const exits = values.filter(row => row[1] === '退出' && row[2] === today).length;
+
+  return entries - exits;
+}
+
 // ✅ LINE Webhookルート（raw bodyで署名検証を通す＋エラーハンドリング付き）
 app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   line.middleware(config)(req, res, async () => {
